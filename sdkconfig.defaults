@@ -1,0 +1,28 @@
+# --- Bluetooth Settings ---
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+# Set to 'n' for Bluedroid to save space
+CONFIG_BT_CONTROLLER_ONLY=n
+
+# --- NimBLE Specifics ---
+# Increase the number of max connections if adding more sensors later
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=3
+# NUS usually needs a slightly larger MSYS buffer for telemetry packets
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=12
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_SIZE=256
+
+# --- Memory & Performance ---
+# Optimize for speed
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+# Ensure the Main Task has enough stack for MQTT/WiFi init
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# --- WiFi & LWIP ---
+# Use the high-performance memory allocation for networking
+CONFIG_LWIP_LOCAL_HOSTNAME="tessera-gateway"
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+
+# --- Partition Table ---
+# Ensure you have room for the app; use 'min_spiffs' or 'huge_app'
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
