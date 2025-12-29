@@ -1,6 +1,8 @@
 CMakePresets.json
+managed_components/
 .vscode/
 .vs/
+*.old
 *.lock
 *.*~
 *.autosave
