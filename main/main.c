@@ -23,8 +23,8 @@
 #define TAG "ROVER_S3"
 
 // --- Hardware Pins ---
-#define TRIG_PIN       GPIO_NUM_12
-#define ECHO_PIN       GPIO_NUM_13
+#define TRIG_PIN       GPIO_NUM_13
+#define ECHO_PIN       GPIO_NUM_17
 #define PIR_PIN        GPIO_NUM_14
 #define MQ2_CHAN       ADC1_CHANNEL_0 
 
@@ -48,6 +48,7 @@ static uint16_t g_conn_handle = 0;
 static uint16_t g_rx_char_handle = 0; 
 
 // --- Sensor Polling ---
+/*
 void sensor_poll_task(void *pv)
 {
     gpio_set_direction(TRIG_PIN, GPIO_MODE_OUTPUT);
@@ -72,9 +73,84 @@ void sensor_poll_task(void *pv)
         g_sensors.distance = (float)(esp_timer_get_time() - t2) * 0.034 / 2;
 
         g_sensors.motion = gpio_get_level(PIR_PIN);
-        g_sensors.gas = adc1_get_raw(MQ2_CHAN);
+
+        //ESP_LOGI(TAG, "PIR sensor: %d", g_sensors.motion);
+        ESP_LOGI(TAG, "Distance : %1f", g_sensors.distance);
+
+        g_sensors.gas = adc1_get_raw(MQ2_CHAN);     
 
         vTaskDelay(pdMS_TO_TICKS(2500));
+    }
+}
+*/
+
+void sensor_poll_task(void *pv)
+{
+    // Hardware Setup
+    gpio_reset_pin(TRIG_PIN);
+    gpio_set_direction(TRIG_PIN, GPIO_MODE_OUTPUT);
+    
+    gpio_reset_pin(ECHO_PIN);
+    gpio_set_direction(ECHO_PIN, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(ECHO_PIN, GPIO_PULLDOWN_ONLY); // Hardware atom: ensure clean 0V
+
+    // ADC setup for MQ2 (even if disconnected, keep config stable)
+    adc1_config_width(ADC_WIDTH_BIT_12);
+    adc1_config_channel_atten(MQ2_CHAN, ADC_ATTEN_DB_11);
+
+    while (1) 
+    {
+        // 1. Clean the line
+        gpio_set_level(TRIG_PIN, 0);
+        esp_rom_delay_us(5);
+
+        // 2. Send the Trigger Pulse
+        gpio_set_level(TRIG_PIN, 1);
+        esp_rom_delay_us(10);
+        gpio_set_level(TRIG_PIN, 0);
+
+        // 3. Wait for the Rising Edge (Pulse Start)
+        int64_t start_limit = esp_timer_get_time();
+        while(gpio_get_level(ECHO_PIN) == 0) {
+            if ((esp_timer_get_time() - start_limit) > 35000) {
+                g_sensors.distance = -1.0; 
+                goto log_step;
+            }
+        }
+        int64_t t1 = esp_timer_get_time();
+
+        // 4. THE NOISE GATE (Critical Fix)
+        // We ignore the first 200 microseconds of the ECHO signal.
+        // This bypasses the electrical crosstalk that caused your 0.8cm readings.
+        esp_rom_delay_us(200); 
+
+        // 5. Wait for the Falling Edge (Pulse End)
+        while(gpio_get_level(ECHO_PIN) == 1) {
+            // Maximum range for HC-SR04 is ~400cm (~23ms)
+            if ((esp_timer_get_time() - t1) > 40000) {
+                g_sensors.distance = -1.0;
+                goto log_step;
+            }
+        }
+        int64_t t2 = esp_timer_get_time();
+
+        // 6. Calculate Distance (Speed of sound = 0.0343 cm/us)
+        float duration = (float)(t2 - t1);
+        g_sensors.distance = (duration * 0.0343) / 2.0;
+
+log_step:
+        // Read other atoms (MQ2 and PIR currently disconnected/floating)
+        g_sensors.gas = adc1_get_raw(MQ2_CHAN); 
+        
+        // Log results with clean formatting
+        if (g_sensors.distance < 0) {
+            ESP_LOGW("ROVER_S3", "Dist: TIMEOUT | Gas Raw: %d", g_sensors.gas);
+        } else {
+            ESP_LOGI("ROVER_S3", "Dist: %.1f cm | Gas Raw: %d", g_sensors.distance, g_sensors.gas);
+        }
+
+        // Poll at 500ms for a balance of performance and stability
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
