@@ -1,6 +1,6 @@
 /* * ROBO PATROL - Integrated Control & Cloud Logic (ESP32-S3)
  * Style: Allman (Broken Braces)
- * Features: UART Hub (Arduino), L298N Drivetrain, WiFi, MQTT Client, Camera Stubs
+ * Features: UART Hub (Arduino), L298N Drivetrain, WiFi, ThingSpeak REST, Camera Stubs
  */
 
 #include <stdio.h>
@@ -12,20 +12,21 @@
 #include "nvs_flash.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
-#include "mqtt_client.h"
+#include "esp_http_client.h" // Swapped mqtt_client.h for http_client
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_camera.h"
 
 static const char *TAG = "ROBO_PATROL";
 
-// --- Configuration: WiFi & MQTT ---
+// --- Configuration: WiFi & ThingSpeak ---
 #define STATUS_LED_GPIO    2
 static const char *WIFI_SSID       = "RPGWSSID";
 static const char *WIFI_PSK        = "Robo@2026";
-static const char *MQTT_URL        = "mqtt://broker.emqx.io:1883";
-static const char *MQTT_TOPIC_PUB  = "robopatrol/telemetry";
-static const char *MQTT_TOPIC_SUB  = "robopatrol/commands";
+
+// ThingSpeak Settings
+#define THINGSPEAK_API_KEY  "YOUR_DUMMY_API_KEY" // Kids: Replace with your Write API Key
+#define THINGSPEAK_URL      "http://api.thingspeak.com/update"
 
 // --- Configuration: Hardware Pins ---
 #define MOTOR_A_IN1    GPIO_NUM_4
@@ -47,7 +48,6 @@ typedef struct
 } rover_sensors_t;
 
 static rover_sensors_t g_sensors = {0};
-static esp_mqtt_client_handle_t mqtt_client;
 static bool wifi_connected = false;
 
 // --- Motor Control Logic ---
@@ -59,36 +59,23 @@ void drive_motors(int a1, int a2, int b3, int b4)
     gpio_set_level(MOTOR_B_IN4, b4);
 }
 
-// --- MQTT Event Handler (Commands from Cloud) ---
-static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
-{
-    esp_mqtt_event_handle_t event = event_data;
-    if (event_id == MQTT_EVENT_CONNECTED)
-    {
-        esp_mqtt_client_subscribe(mqtt_client, MQTT_TOPIC_SUB, 0);
-        ESP_LOGI(TAG, "MQTT Connected. Subscribed to commands.");
-        esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC_PUB, "RoboPatrol Startup", 0, 1, 0);
-    }
-    else if (event_id == MQTT_EVENT_DATA)
-    {
-        if (strncmp(event->data, "FORWARD", event->data_len) == 0) drive_motors(1, 0, 1, 0);
-        else if (strncmp(event->data, "STOP", event->data_len) == 0) drive_motors(0, 0, 0, 0);
-    }
-}
-
 // --- WiFi Event Handler ---
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) 
 {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) esp_wifi_connect();
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) 
+    {
+        esp_wifi_connect();
+    }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) 
     {
         wifi_connected = false;
         esp_wifi_connect();
+        ESP_LOGW(TAG, "WiFi Disconnected. Retrying...");
     } 
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) 
     {
         wifi_connected = true;
-        if (mqtt_client) esp_mqtt_client_start(mqtt_client);
+        ESP_LOGI(TAG, "WiFi Connected. Ready for ThingSpeak.");
     }
 }
 
@@ -111,6 +98,9 @@ void arduino_listener_task(void *pv)
                 g_sensors.distance = d_val;
                 g_sensors.gas = g_val;
 
+                // PRINT TO DEBUG CONSOLE
+                ESP_LOGI(TAG, "SENSOR DATA -> Dist: %.1f cm, CO2: %d", d_val, g_val);
+
                 // Fail-safe: Local obstacle avoidance overrides cloud
                 if (g_sensors.distance > 0 && g_sensors.distance < 25.0)
                 {
@@ -123,19 +113,41 @@ void arduino_listener_task(void *pv)
     }
 }
 
-void mqtt_publisher_task(void *pvParameters) 
+// NEW: ThingSpeak Publisher Task (Replaces MQTT)
+void thingspeak_publisher_task(void *pvParameters) 
 {
-    char json[128];
+    char url_buffer[256];
     while (1) 
     {
-        if (wifi_connected && mqtt_client) 
+        if (wifi_connected) 
         {
-            snprintf(json, sizeof(json), "{\"dist\":%.1f,\"gas\":%d,\"cam\":%d}", 
+            // Prepare the HTTP GET request URL
+            // Field1: Distance, Field2: Gas, Field3: Camera Status
+            snprintf(url_buffer, sizeof(url_buffer), 
+                     "%s?api_key=%s&field1=%.1f&field2=%d&field3=%d", 
+                     THINGSPEAK_URL, THINGSPEAK_API_KEY, 
                      g_sensors.distance, g_sensors.gas, g_sensors.camera_ok);
+
+            esp_http_client_config_t config = {
+                .url = url_buffer,
+                .method = HTTP_METHOD_GET,
+            };
             
-            esp_mqtt_client_publish(mqtt_client, MQTT_TOPIC_PUB, json, 0, 1, 0);
+            esp_http_client_handle_t client = esp_http_client_init(&config);
+            esp_err_t err = esp_http_client_perform(client);
+
+            if (err == ESP_OK) 
+            {
+                ESP_LOGI(TAG, "ThingSpeak Update Sent: Dist=%.1f", g_sensors.distance);
+            } 
+            else 
+            {
+                ESP_LOGE(TAG, "HTTP Update Failed: %s", esp_err_to_name(err));
+            }
+            esp_http_client_cleanup(client);
         }
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        // ThingSpeak free tier requires 15 seconds between updates
+        vTaskDelay(pdMS_TO_TICKS(16000)); 
     }
 }
 
@@ -247,15 +259,8 @@ void app_main(void)
     esp_netif_set_hostname(netif, "RoboPatrol");
     esp_wifi_start();
 
-    // MQTT Setup
-    const esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = MQTT_URL,
-    };
-    mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
-    esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
-
     // Start Tasks
     xTaskCreate(status_led_task, "led_task", 2048, NULL, 1, NULL);
     xTaskCreate(arduino_listener_task, "uart_sync", 4096, NULL, 10, NULL);
-    xTaskCreate(mqtt_publisher_task, "mqtt_pub", 4096, NULL, 5, NULL);
+    xTaskCreate(thingspeak_publisher_task, "ts_pub", 8192, NULL, 5, NULL);
 }
